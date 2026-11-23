@@ -22,7 +22,7 @@
 <main>
   <h1>Set up Wi-Fi over Bluetooth</h1>
   <p>Your Wi-Fi settings go directly to the board over Bluetooth.</p>
-  <p>Select the board shown on USB serial. If it is already online, send <code>setup</code> over USB serial first.</p>
+  <p>Select the board shown on the OLED. If it is already online, send <code>setup</code> over USB serial first.</p>
   <button id="pair" type="button" disabled>Select board</button>
   <form id="setup">
     <label for="ssid">2.4 GHz network name (SSID)</label>
@@ -51,7 +51,9 @@
   let sending = false;
   let saved = false;
   let hasPairingCheck = false;
-  const pairingHelp = 'Pair the board in your device’s Bluetooth settings using the current USB serial PIN, then select it here again. If it is already paired, remove it and pair again.';
+  const pinHelp = 'Use the PIN on the board’s OLED or USB serial.';
+  const pairingHelp = 'Pair the board in your device’s Bluetooth settings, then select it here again. ' + pinHelp +
+    ' If it is already paired, remove it and pair again.';
 
   function releaseDevice() {
     const previous = device;
@@ -93,13 +95,13 @@
       hasPairingCheck = Boolean(pairing);
       if (pairing) {
         checkingPairing = true;
-        feedback.textContent = 'Pairing with the board. Enter the PIN shown on USB serial if asked.';
+        feedback.textContent = 'Pairing with the board. ' + pinHelp;
         await pairing.readValue();
         checkingPairing = false;
       }
       const value = await statusValue.readValue();
       if (value.getUint8(0) === 5) throw new Error('Open setup on the board and try again.');
-      feedback.textContent = 'Connected to ' + device.name + '. Enter the PIN shown on USB serial if asked.';
+      feedback.textContent = 'Connected to ' + device.name + '. ' + (pairing ? '' : pinHelp);
       saveButton.disabled = false;
     } catch (error) {
       const pairingError = checkingPairing || (device && error.name === 'NetworkError');
@@ -127,7 +129,7 @@
 
     sending = true;
     saveButton.disabled = true;
-    feedback.textContent = 'Sending Wi-Fi settings. Use the pairing PIN shown on USB serial.';
+    feedback.textContent = 'Sending Wi-Fi settings…';
     let writing = true;
     try {
       const frame = Uint8Array.of(ssid.length, password.length, ...ssid, ...password);
