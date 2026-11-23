@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
+<title>ESP32-C3 Bluetooth Wi-Fi Setup</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 2rem 1rem; font: 1rem/1.5 system-ui, sans-serif; color: #142437; background: #edf3f7; }
+  main { max-width: 30rem; margin: auto; padding: clamp(1.25rem, 5vw, 2rem); border-radius: 1rem; background: white; box-shadow: 0 8px 30px #18375316; }
+  h1 { margin: 0; font-size: 1.75rem; line-height: 1.15; }
+  p { margin: .75rem 0; }
+  label { display: block; margin-top: 1rem; font-weight: 650; }
+  input, button { display: block; width: 100%; padding: .7rem .8rem; border-radius: .45rem; font: inherit; }
+  input { margin: .25rem 0; border: 1px solid #65788a; }
+  button { margin-top: 1rem; border: 0; background: #075b6b; color: white; font-weight: 650; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #pair { border: 1px solid #075b6b; background: white; color: #075b6b; }
+  small { color: #455769; }
+  #status { min-height: 3em; margin-bottom: 0; overflow-wrap: anywhere; }
+</style>
+<main>
+  <h1>Set up Wi-Fi over Bluetooth</h1>
+  <p>Your Wi-Fi settings go directly to the board over Bluetooth.</p>
+  <p>Select the board shown on USB serial. If it is already online, send <code>setup</code> over USB serial first.</p>
+  <button id="pair" type="button" disabled>Select board</button>
+  <form id="setup">
+    <label for="ssid">2.4 GHz network name (SSID)</label>
+    <input id="ssid" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <label for="password">Wi-Fi password</label>
+    <input id="password" type="password" maxlength="64" autocomplete="new-password" aria-describedby="password-tip">
+    <small id="password-tip">For an open network, leave the password blank.</small>
+    <button id="save" disabled>Connect to Wi-Fi</button>
+  </form>
+  <p id="status" role="status" aria-live="polite"></p>
+  <noscript>Enable JavaScript to use Bluetooth setup.</noscript>
+</main>
+<script>
+  const serviceUuid = '9527370c-b9ac-4ef1-a8da-199d1428135d';
+  const writeUuid = '9527370c-b9ac-4ef1-a8da-199d1428135e';
+  const statusUuid = '9527370c-b9ac-4ef1-a8da-199d1428135f';
+  const pairButton = document.querySelector('#pair');
+  const saveButton = document.querySelector('#save');
+  const ssidInput = document.querySelector('#ssid');
+  const passwordInput = document.querySelector('#password');
+  const feedback = document.querySelector('#status');
+  const encode = new TextEncoder();
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let device, inbox, statusValue;
+  let sending = false;
+  let saved = false;
+
+  const supported = window.isSecureContext && Boolean(navigator.bluetooth);
+  pairButton.disabled = !supported;
+  if (!supported) {
+    feedback.textContent = 'Open this page in a Web Bluetooth browser on localhost or HTTPS.';
+  }
+
+  pairButton.addEventListener('click', async () => {
+    pairButton.disabled = true;
+    saveButton.disabled = true;
+    try {
+      const selected = await navigator.bluetooth.requestDevice({filters: [{services: [serviceUuid]}]});
+      if (device?.gatt.connected && device !== selected) device.gatt.disconnect();
+      device = selected;
+      saved = false;
+      selected.addEventListener('gattserverdisconnected', () => {
+        if (device !== selected) return;
+        saveButton.disabled = true;
+        pairButton.disabled = false;
+        if (!sending && !saved) feedback.textContent = 'Board disconnected. Select it again to reconnect.';
+      }, {once: true});
+      const gatt = await device.gatt.connect();
+      const service = await gatt.getPrimaryService(serviceUuid);
+      inbox = await service.getCharacteristic(writeUuid);
+      statusValue = await service.getCharacteristic(statusUuid);
+      const value = await statusValue.readValue();
+      if (value.getUint8(0) === 5) throw new Error('Open setup on the board and try again.');
+      feedback.textContent = 'Connected to ' + device.name + '. Enter the PIN shown on USB serial if asked.';
+      saveButton.disabled = false;
+    } catch (error) {
+      feedback.textContent = 'Could not connect to the board. ' + error.message;
+      device?.gatt.disconnect();
+      pairButton.disabled = false;
+    }
+  });
+
+  document.querySelector('#setup').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!device?.gatt.connected || sending || saved) return;
+    const ssid = encode.encode(ssidInput.value);
+    const passwordText = passwordInput.value;
+    const password = encode.encode(passwordText);
+    if (!ssid.length || ssid.length > 32 || ssid.includes(0)) {
+      feedback.textContent = 'Enter a network name up to 32 UTF-8 bytes.';
+      return;
+    }
+    if (password.length && !/^(?:[\x20-\x7E]{8,63}|[0-9a-fA-F]{64})$/.test(passwordText)) {
+      feedback.textContent = 'Use 8–63 printable ASCII characters, 64 hex digits, or leave the password blank.';
+      return;
+    }
+
+    sending = true;
+    saveButton.disabled = true;
+    feedback.textContent = 'Sending Wi-Fi settings. Use the pairing PIN shown on USB serial.';
+    try {
+      const frame = Uint8Array.of(ssid.length, password.length, ...ssid, ...password);
+      for (let offset = 0; offset < frame.length; offset += 19) {
+        await inbox.writeValueWithResponse(Uint8Array.of(offset, ...frame.subarray(offset, offset + 19)));
+      }
+      feedback.textContent = 'Connecting to Wi-Fi…';
+      const deadline = Date.now() + 33000;
+      do {
+        await pause(500);
+        const value = await statusValue.readValue();
+        const state = value.getUint8(0);
+        if (state === 2) throw new Error('Could not join Wi-Fi. Check the network name and password.');
+        if (state === 3) throw new Error('The board could not save the settings. Try again.');
+        if (state === 4) {
+          const ip = Array.from({length: 4}, (_, i) => value.getUint8(i + 1)).join('.');
+          const suffix = device.name?.match(/^C3-([0-9a-f]{6})$/i)?.[1];
+          const address = suffix ? 'c3-mqtt-' + suffix.toLowerCase() + '.local:1883 (' + ip + ')' : ip + ':1883';
+          feedback.textContent = 'Wi-Fi saved. MQTT will be available at ' + address + '.';
+          passwordInput.value = '';
+          saved = true;
+          return;
+        }
+        if (state === 5) throw new Error('The board left setup. Check USB serial for its current status.');
+      } while (Date.now() < deadline);
+      throw new Error('Setup timed out. Check the board’s USB serial output before retrying.');
+    } catch (error) {
+      feedback.textContent = 'Wi-Fi setup could not finish. ' + error.message;
+    } finally {
+      sending = false;
+      saveButton.disabled = saved || !device.gatt.connected;
+    }
+  });
+</script>
+</html>
