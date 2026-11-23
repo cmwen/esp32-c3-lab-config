@@ -39,6 +39,7 @@
   const serviceUuid = '9527370c-b9ac-4ef1-a8da-199d1428135d';
   const writeUuid = '9527370c-b9ac-4ef1-a8da-199d1428135e';
   const statusUuid = '9527370c-b9ac-4ef1-a8da-199d1428135f';
+  const pairingUuid = '9527370c-b9ac-4ef1-a8da-199d14281360';
   const pairButton = document.querySelector('#pair');
   const saveButton = document.querySelector('#save');
   const ssidInput = document.querySelector('#ssid');
@@ -49,6 +50,14 @@
   let device, inbox, statusValue;
   let sending = false;
   let saved = false;
+  let hasPairingCheck = false;
+  const pairingHelp = 'Pair the board in your device’s Bluetooth settings using the current USB serial PIN, then select it here again. If it is already paired, remove it and pair again.';
+
+  function releaseDevice() {
+    const previous = device;
+    device = undefined;
+    previous?.gatt.disconnect();
+  }
 
   const supported = window.isSecureContext && Boolean(navigator.bluetooth);
   pairButton.disabled = !supported;
@@ -59,6 +68,7 @@
   pairButton.addEventListener('click', async () => {
     pairButton.disabled = true;
     saveButton.disabled = true;
+    let checkingPairing = false;
     try {
       const selected = await navigator.bluetooth.requestDevice({filters: [{services: [serviceUuid]}]});
       if (device?.gatt.connected && device !== selected) device.gatt.disconnect();
@@ -74,13 +84,28 @@
       const service = await gatt.getPrimaryService(serviceUuid);
       inbox = await service.getCharacteristic(writeUuid);
       statusValue = await service.getCharacteristic(statusUuid);
+      let pairing;
+      try {
+        pairing = await service.getCharacteristic(pairingUuid);
+      } catch (error) {
+        if (error.name !== 'NotFoundError') throw error;
+      }
+      hasPairingCheck = Boolean(pairing);
+      if (pairing) {
+        checkingPairing = true;
+        feedback.textContent = 'Pairing with the board. Enter the PIN shown on USB serial if asked.';
+        await pairing.readValue();
+        checkingPairing = false;
+      }
       const value = await statusValue.readValue();
       if (value.getUint8(0) === 5) throw new Error('Open setup on the board and try again.');
       feedback.textContent = 'Connected to ' + device.name + '. Enter the PIN shown on USB serial if asked.';
       saveButton.disabled = false;
     } catch (error) {
-      feedback.textContent = 'Could not connect to the board. ' + error.message;
-      device?.gatt.disconnect();
+      const pairingError = checkingPairing || (device && error.name === 'NetworkError');
+      releaseDevice();
+      feedback.textContent = pairingError ? 'Bluetooth authentication could not be confirmed. ' + pairingHelp :
+        'Could not connect to the board. ' + error.message;
       pairButton.disabled = false;
     }
   });
@@ -103,11 +128,13 @@
     sending = true;
     saveButton.disabled = true;
     feedback.textContent = 'Sending Wi-Fi settings. Use the pairing PIN shown on USB serial.';
+    let writing = true;
     try {
       const frame = Uint8Array.of(ssid.length, password.length, ...ssid, ...password);
       for (let offset = 0; offset < frame.length; offset += 19) {
         await inbox.writeValueWithResponse(Uint8Array.of(offset, ...frame.subarray(offset, offset + 19)));
       }
+      writing = false;
       feedback.textContent = 'Connecting to Wi-Fi…';
       const deadline = Date.now() + 33000;
       do {
@@ -129,10 +156,19 @@
       } while (Date.now() < deadline);
       throw new Error('Setup timed out. Check the board’s USB serial output before retrying.');
     } catch (error) {
-      feedback.textContent = 'Wi-Fi setup could not finish. ' + error.message;
+      if (writing) {
+        releaseDevice();
+        pairButton.disabled = false;
+        const updateHint = hasPairingCheck ? '' : ' If pairing still fails, update the mqtt-broker firmware.';
+        feedback.textContent = 'Could not send Wi-Fi settings over Bluetooth. ' + pairingHelp + updateHint;
+      } else if (error.name === 'NetworkError') {
+        feedback.textContent = 'Lost the Bluetooth status connection. Check the OLED or USB serial to see whether Wi-Fi was saved, then reconnect if needed.';
+      } else {
+        feedback.textContent = 'Wi-Fi setup could not finish. ' + error.message;
+      }
     } finally {
       sending = false;
-      saveButton.disabled = saved || !device.gatt.connected;
+      saveButton.disabled = saved || !device?.gatt.connected;
     }
   });
 </script>
